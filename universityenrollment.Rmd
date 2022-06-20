@@ -1,0 +1,296 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(kableExtra)
+library(GGally)
+library(kableExtra) 
+library(vip) 
+library(fastshap)  
+library(MASS)
+```
+
+# Import data
+```{r}
+enr <- read_csv("inq05_samp.csv") %>%
+  clean_names()
+
+head(enr) 
+```
+
+
+# Remove data that is rejected
+```{r}
+subset(enr,select=c(campus_visit,enroll,instate,referral_cntcts,self_init_cntcts,solicited_cntcts,recr_code,total_contacts,travel_init_cntcts,avg_income,distance,hscrat,init_span,int1rat,int2rat,interest,mailq,premiere,stuemail))->enrnew
+enrnew
+colnames(enrnew)<-make.unique(names(enrnew))
+```
+
+# Skim
+```{r}
+enrnew %>% skim()
+```
+
+# Explore data
+## Explore target
+```{r}
+enrnew %>%
+  ggplot(aes(x=enroll)) +
+  geom_histogram(stat="count") +
+  labs(title = "Enrollment")
+
+enrnew %>%
+  group_by(enroll) %>%
+  summarize(n=n()) %>%
+  ungroup() %>%
+  mutate(pct = n/sum(n))
+```
+
+## Explore Numerics
+```{r}
+#change target to factor
+
+enrnew$enroll <- as.factor(enrnew$enroll) 
+
+# -- comparative boxplots
+ggplot(enrnew, aes(x=enroll, y=campus_visit)) + geom_boxplot() +labs(title = "Campus Visit Code")
+ggplot(enrnew, aes(x=enroll, y=referral_cntcts )) + geom_boxplot() +labs(title = "Referral Contact Count")
+ggplot(enrnew, aes(x=enroll, y=self_init_cntcts )) + geom_boxplot() +labs(title = "Self-initiated Contact Count")
+ggplot(enrnew, aes(x=enroll, y=solicited_cntcts  )) + geom_boxplot() +labs(title = "Solicited Contact Count")
+ggplot(enrnew, aes(x=enroll, y=total_contacts )) + geom_boxplot() +labs(title = "Total Contact Count")
+ggplot(enrnew, aes(x=enroll, y=travel_init_cntcts)) + geom_boxplot() +labs(title = "Travel Initiated Contact Count")
+ggplot(enrnew, aes(x=enroll, y=avg_income )) + geom_boxplot() +labs(title = "Commercial Household Income Estimate")
+ggplot(enrnew, aes(x=enroll, y=distance )) + geom_boxplot() +labs(title = "Distance from University")
+ggplot(enrnew, aes(x=enroll, y=hscrat)) + geom_boxplot() +labs(title = "5-year Enrollment Rate from Student’s High School")
+ggplot(enrnew, aes(x=enroll, y=init_span)) + geom_boxplot() +labs(title = "Time from First Contact to Enrollment Date")
+ggplot(enrnew, aes(x=enroll, y= int1rat  )) + geom_boxplot() +labs(title = "5-year Primary Interest Code Rate")
+ggplot(enrnew, aes(x=enroll, y=int2rat)) + geom_boxplot() +labs(title = "5-year Secondary Interest Code Rate")
+ggplot(enrnew, aes(x=enroll, y=interest)) + geom_boxplot() +labs(title = "Number of Indicated Extracurricular Interests")
+ggplot(enrnew, aes(x=enroll, y=mailq )) + geom_boxplot() +labs(title = "Mail Qualifying Score")
+ggplot(enrnew, aes(x=enroll, y=premiere)) + geom_boxplot() +labs(title = "Attended Campus Recruitment Event")
+ggplot(enrnew, aes(x=enroll, y=stuemail)) + geom_boxplot() +labs(title = "Email Address")
+
+```
+
+## Explore character variables  
+```{r}
+char_explore <- function(col){
+  enrnew %>%
+    ggplot(., aes(!!as.name(col))) + 
+    geom_bar(aes(fill = enroll), position = "fill") 
+}
+
+# -- for each character column if it doesnt equal customer id then create a chart
+for (column in names(enrnew %>% select_if (is_character))){
+  chrt <- char_explore(column)
+    print(chrt)
+  
+}
+
+```
+
+
+
+
+
+# Getting Started with Logistic 
+
+
+##  1.Partition data 70/30 (train / test split) 
+```{r}
+# -- set a random seed for repeatablity 
+set.seed(43)
+
+# -- performs our train / test split 
+enr_split <- initial_split(enrnew, prop = 0.7)
+
+# -- extract the training data 
+enr_train <- training(enr_split)
+# -- extract the test data 
+enr_test <- testing(enr_split)
+
+sprintf("Train PCT : %1.2f%%", nrow(enr_train)/ nrow(enrnew) * 100)
+sprintf("Test  PCT : %1.2f%%", nrow(enr_test)/ nrow(enrnew) * 100)
+```
+
+## 2. Recipe
+```{r}
+enr_recipe <- recipe(enroll ~ ., data = enr_train) %>%
+  step_rm(avg_income,distance) %>%
+  step_medianimpute(all_numeric()) %>%
+  prep()
+enr_recipe
+```
+
+## 3. Bake 
+```{r}
+# -- apply the recipe 
+bake_train <- bake(enr_recipe, new_data = enr_train)
+bake_test  <- bake(enr_recipe, new_data = enr_test)
+```
+
+
+
+## 4. Fit 
+```{r,warning=FALSE, message=FALSE}
+logistic_glm <-logistic_reg(mode = "classification") %>%
+                  set_engine("glm") %>%
+                  fit(enroll ~ ., data = bake_train)
+
+## -- check out your parameter estimates ... 
+tidy(logistic_glm) %>%
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"),round, 4)
+
+
+```
+## 5. Prep for Evaluation 
+```{r}
+# -- training 
+predict(logistic_glm, bake_train, type = "prob") %>%
+  bind_cols(.,predict(logistic_glm, bake_train)) %>%
+  bind_cols(.,bake_train) -> scored_train_glm
+
+head(scored_train_glm)
+
+# -- testing 
+predict(logistic_glm, bake_test, type = "prob") %>%
+  bind_cols(.,predict(logistic_glm, bake_test)) %>%
+  bind_cols(.,bake_test) -> scored_test_glm
+
+head(scored_test_glm)
+```
+
+## 6. Evaluate
+```{r}
+# -- AUC: Train and Test 
+scored_train_glm %>% 
+  metrics(enroll, .pred_1, estimate = .pred_class) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test_glm %>% 
+               metrics(enroll, .pred_1, estimate = .pred_class) %>%
+               mutate(part="testing") ) 
+
+# -- Variable Importance top 10 features  
+logistic_glm %>%
+  vip(num_features = 10)
+
+# -- ROC Charts 
+scored_train_glm %>%
+  mutate(model = "train") %>%
+  bind_rows(scored_test_glm %>%
+              mutate(model="test")) %>%
+  group_by(model) %>%
+  roc_curve(enroll, .pred_1) %>%
+  autoplot()
+
+# -- Confustion Matricies  
+scored_train_glm %>%
+  conf_mat(enroll, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Train Confusion Matrix")
+
+scored_test_glm %>%
+  conf_mat(enroll, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Test Confusion Matrix")
+```
+# Stepwise Model
+```{r}
+## -- Use stepwise selection to reduce the model
+steplog <- glm(enroll ~ ., data = bake_train, family=binomial(link="logit"))
+step <- stepAIC(steplog, direction="both")
+summary(step)
+
+```
+
+# Reduced Model
+## Fit and Evaluate
+```{r}
+## -- Use tidymodel framework to fit and evaulate reduced model
+enr_steprecipe <- recipe(enroll ~ campus_visit + referral_cntcts  + self_init_cntcts
+                        + hscrat + init_span + travel_init_cntcts + instate
+                        + int1rat + int2rat + interest
+                        + mailq + premiere , data = enr_train) %>%
+  step_medianimpute(all_numeric()) %>%
+  prep()
+enr_steprecipe
+
+# -- apply new recipe 
+bake_steptrain <- bake(enr_steprecipe, new_data = enr_train)
+bake_steptest  <- bake(enr_steprecipe, new_data = enr_test)
+
+logistic_step1 <-logistic_reg(mode = "classification") %>%
+                  set_engine("glm") %>%
+                  fit(enroll ~ ., data = bake_steptrain)
+
+## -- check out your parameter estimates ... 
+tidy(logistic_step1) %>%
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"),round, 4)
+```
+
+## Predictions from reduced Model
+```{r}
+# -- training predictions from reduced model
+predict(logistic_step1, bake_steptrain, type = "prob") %>%
+  bind_cols(.,predict(logistic_step1, bake_steptrain)) %>%
+  bind_cols(.,bake_steptrain) -> scored_train_step1
+
+head(scored_train_step1)
+
+# -- testing predictions from reduced model
+predict(logistic_step1, bake_steptest, type = "prob") %>%
+  bind_cols(.,predict(logistic_step1, bake_steptest)) %>%
+  bind_cols(.,bake_steptest) -> scored_test_step1
+
+head(scored_test_step1)
+
+```
+
+## Evaluate Reduced Model
+```{r}
+
+# -- Evaluate Reduced Model
+# -- AUC: Train and Test 
+scored_train_step1 %>% 
+  metrics(enroll, .pred_1, estimate = .pred_class) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test_step1 %>% 
+               metrics(enroll, .pred_1, estimate = .pred_class) %>%
+               mutate(part="testing") 
+  )
+
+
+options(yardstick.event_first = FALSE)
+# -- ROC Charts 
+scored_train_step1 %>%
+  mutate(model = "train") %>%
+  bind_rows(scored_test_step1 %>%
+              mutate(model="test")) %>%
+  group_by(model) %>%
+  roc_curve(enroll, .pred_1) %>%
+  autoplot()
+
+```
+## Confusion Matrics
+```{r}
+# -- Confustion Matricies  
+scored_train_step1 %>%
+  conf_mat(enroll, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Train Confusion Matrix")
+
+scored_test_step1 %>%
+  conf_mat(enroll, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Test Confusion Matrix")
+
+```
