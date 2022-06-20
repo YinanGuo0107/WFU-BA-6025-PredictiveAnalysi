@@ -1,0 +1,159 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r}
+library(pROC)
+library(caret)
+library(janitor)
+library(stringr)
+library(dplyr)
+library(readr)
+library(skimr)
+library(ggplot2)
+```
+
+# load file
+```{r}
+lostsales <- read_csv("LostSales.csv") %>% clean_names()
+head(lostsales)
+```
+
+#	What percentage of the quotes don’t result in subsequent orders within 30 days?
+### Q:49.45%
+```{r}
+status <- as.factor(lostsales$status)
+table(status)
+a<-272/(272+278)
+a
+```
+
+#	Using a simple contingency table or graph, does it appear that winning a sale is associated with part type (OE or AM)?  That is, does there appear to be a difference in the percentage of sales won for OE vs AM suppliers?  (You don’t need to do a formal statistical test)
+
+### Yes. There appear to be a difference in the percentage of sales won for OE vs AM suppliers that percentage of AM in Lost is smaller than in Won and the percentage of OE in Lost is larger than in Won. 
+```{r}
+lostsales %>%
+  group_by(part_type,status) %>%
+  count() 
+
+lostsales %>%
+  group_by(part_type,status) %>%
+  count() %>%
+  ggplot(aes(x=status,y=n,fill=part_type)) +
+  geom_bar(stat='identity')
+```
+
+# Build a simple logistic regression model for Status vs Quote.  Based on this model, does it appear that the likelihood that an order will be lost increases or decreases as the quoted price increases?  Is quoted price a significant predictor of whether or not an order will be lost?  
+### The equation is Logit(p)=b0+b1x1+b2x2 and in this case is logit(p)=-7.411e-02+1.881e-05*quote.
+### P=1/(1+exp(-(-7.411e-02+1.881e-05*quote)))
+### When quote increase, exp(7.411e-02-1.881e-05*quote) decrease and then P increase.
+### However, since prvalue for quote is 0.529 and relative large, it is not an important predictor of whether or not an order will be lost.
+```{r}
+levels(status)
+
+logit_Q <- glm(relevel(status,"Won") ~ lostsales$quote, family=binomial(link="logit"))
+summary(logit_Q)
+```
+#	Use logistic regression to explore the relationship between winning an order and delivery time (with the ultimate goal of predicting the probability of losing and order).  Is time to delivery a significant predictor of whether or not the order is lost?  How does time to delivery affect the likelihood of losing an order?
+### pvalue for time_to_delivery is relatively small so that it is an important predictor to lost.
+### The equation between time_to_delivery and P(Lost) is:
+### logit(p)=-0.582915+0.018134*time_to_delivery
+### P=1/(1+exp(-(-0.582915+0.018134*time_to_delivery)))
+### Thus, when time_to_delivery increase, exp(-0.582915+0.018134*time_to_delivery) decrease, P increase.
+### The increasement of delivery time make the probability of losing an order increase.
+```{r}
+#I'm not sure whether the question is to explore Won or explore Lost so I wrote both.
+#Explore the relationship between losing an order and delivery time
+logit_T1 <- glm(relevel(status,"Won") ~ lostsales$time_to_delivery, family=binomial(link="logit"))
+summary(logit_T1)
+#Explore the relationship between winning an order and delivery time
+logit_T2 <- glm(status ~ lostsales$time_to_delivery, family=binomial(link="logit"))
+summary(logit_T2)
+```
+
+# A multiple logistic regression model that includes Quote, Part Type, and Time to Delivery as the explanatory variables
+### pvalue for quote is relatively high.
+```{r}
+logit_all <- glm(status ~ lostsales$time_to_delivery + lostsales$quote + lostsales$part_type, family=binomial(link="logit"))
+summary(logit_all)
+```
+
+# Remove quote
+```{r}
+logit_q2 <- glm(relevel(status,"Won")  ~ lostsales$time_to_delivery +  lostsales$part_type, family=binomial(link="logit"))
+summary(logit_q2 )
+coefficients(logit_q2)
+anova(logit_q2)
+```
+
+#	Does this model appear to be useful for predicting the likelihood of a lost sale?  What is the misclassification rate?  What is the area under the ROC curve?
+### The accuracy for this model is 0.5982, which is larger than 0.5 and pvalue for the model is 7.756e-06 which is relatively small. So I believe it to be a useful model.
+### The misclassification rate is 1-0.5982=0.4018
+### Area under the ROC curve: 0.6376
+```{r}
+pvalue <- predict(logit_q2, lostsales, type="response")
+
+pstatus <- ifelse(pvalue < 0.5, 'Won', 'Lost')
+pstatus <- as.factor(pstatus)
+
+confusionMatrix(pstatus,status)
+
+roc(status, pvalue, plot=TRUE,auc=TRUE)
+```
+#	Generate a confusion matrix.  Does the model appear to be more effective at correctly predicting lost sales or won sales (or is it equally effective at predicting both)?
+### This model is more effective at correctly predicting won sales.
+```{r}
+confusionMatrix(pstatus,status)
+plostright<-136/(136+136)
+pwonright<-193/(193+85)
+sprintf("Lost sales correctly predicted rate is :  %f ",plostright)
+sprintf("Won sales correctly predicted rate is :  %f ",pwonright)
+```
+
+#	Suppose that we have an order in the pipeline that is for an after market (AM) supplier with a quoted price of $1400 and an expected time to deliver of 20 days.  What is the probability that this sales will be lost?  Assuming that the sales person has some control over the quoted price and time to delivery, what actions could he take to decrease the probability of losing the sale (or, equivalently, to increase the probability of winning the sales)?
+
+### logit(P)=-0.723499+0.018344*time_to_delivery+0.475768*part_typeOE
+### P=1/(1+exp(-(-0.723499+0.018344*time_to_delivery+0.475768*part_typeOE)))=0.412
+### The probability that this sales will be lost is 0.412.
+### He could decrease the time to delivery (and remain an AM supplier) to decrease the probability of losing the sale.
+```{r}
+P=1/(1+exp(-(-0.723499+0.018344*20+0.475768*0)))
+P
+```
+
+# For further thought
+## •	In this analysis, you built three different models for predicting lost sales.  How do the misclassification rates compare for the three models?  Is this what you would expect based on the significance of the explanatory variables?
+### accuracy for model1 is 0.5091, misclassification rate is 1-0.5091=0.4909
+### accuracy for model2 is 0.5909, misclassification rate is 1-0.5909=0.4091
+### accuracy for model3 is 0.5982, misclassification rate is 1-0.5982=0.4018
+### Since quote is not a significant predicter while time_to_delivery and type are, it is reasonable to see that accuracy for model 1 is relatively low (and misclassification rate is relatively high). While comparing model2 and model 3, because model3 have considered both of two significant factors, it has better accuracy rate (lower misclassification rate).
+```{r}
+#For model1
+pvalue <- predict(logit_Q, lostsales, type="response")
+pstatus <- ifelse(pvalue < 0.5, 'Won', 'Lost')
+pstatus <- as.factor(pstatus)
+confusionMatrix(pstatus,status)
+roc(status, pvalue, plot=TRUE,auc=TRUE)
+#For model2
+pvalue <- predict(logit_T1, lostsales, type="response")
+pstatus <- ifelse(pvalue < 0.5, 'Won', 'Lost')
+pstatus <- as.factor(pstatus)
+confusionMatrix(pstatus,status)
+roc(status, pvalue, plot=TRUE,auc=TRUE)
+```
+
+## •	Based on the misclassification rates, which model does the best job of predicting Status?
+
+### Model 3 has the lowest misclassification rates so it does the best job of predicting Status.
+
+## •	How could this model be improved?  For example, are there any variables missing from this data set that might improve the model’s predictive ability?
+### We can transform quote to make it a significant predictor. For example, I take the sqrt of quote to predict lost and I got the p-value of 0.150, which is lower than in model 1 so that it is a useful transformation. 
+```{r}
+logit_Q3 <- glm(relevel(status,"Won") ~sqrt(lostsales$quote), family=binomial(link="logit"))
+summary(logit_Q3)
+```
+
