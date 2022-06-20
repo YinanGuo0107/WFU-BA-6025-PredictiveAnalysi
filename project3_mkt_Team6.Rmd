@@ -1,0 +1,135 @@
+---
+title: "Tidymodels Organic Project"
+output: html_notebook
+---
+
+
+## Load Libraries 
+
+```{r, warning=FALSE, message=FALSE}
+
+library(C50)
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(kableExtra)
+library(GGally)
+library(kableExtra) # -- make nice looking resutls when we knitt 
+library(vip)        # --  tidymodels variable importance
+library(fastshap)   # -- shapley values for variable importance 
+library(MASS)
+library(rpart.plot) # -- plotting decision trees 
+library(factoextra)
+library(imputeMissings)
+library(ISLR)
+library(tree)
+```
+
+## Load Data
+
+
+```{r}
+mkt <- read_csv("marketing_campaign.csv") %>%
+  clean_names()
+
+mkt
+
+```
+
+## chage target to factor and Profile data
+
+
+```{r}
+
+odat$target_buy <- as.factor(odat$target_buy)
+
+odat %>%
+  skim()
+
+```
+#prepare data for clustering
+
+```{r}
+# impute missing values
+
+odat2 <- impute(odat)
+head(odat2)
+
+# create dummy variables for gender and promotional class
+
+odat2$male <- ifelse(odat2$dem_gender == 'M', 1, 0)
+odat2$female <- ifelse(odat2$dem_gender == 'F', 1, 0)
+odat2$nogender <- ifelse(odat2$dem_gender == 'U', 1, 0)
+
+odat2$gold <- ifelse(odat2$prom_class == 'Gold', 1, 0)
+odat2$silver <- ifelse(odat2$prom_class == 'Silver', 1, 0)
+odat2$platinum <- ifelse(odat2$prom_class == 'Platinum', 1, 0)
+odat2$tin <- ifelse(odat2$prom_class == 'Tin', 1, 0)
+
+odat2 %>%
+  skim()
+
+# remove redundant and rejected variables
+organics = subset(odat2, select= -c(dem_gender, dem_cluster_group, dem_reg, dem_tv_reg, prom_class, target_buy))
+head(organics)
+
+
+
+```
+# determine number of clusters and run kmeans
+
+```{r}
+
+# how many clusters do we need?
+
+fviz_nbclust(organics, kmeans, method="wss")
+
+```
+
+# generate and visualize clusters
+
+```{r}
+set.seed(904)
+
+clusters1 <- kmeans(organics, 5, iter.max = 200, nstart = 10)
+print(clusters1)
+
+# visualize clusters
+
+fviz_cluster(clusters1,organics,ellipse.type="norm",geom="point")
+
+```
+
+# profile clusters
+
+```{r}
+# review cluster sizes
+
+ggplot(organics,aes(cluster))+geom_bar()
+
+ggplot(organics,aes(x=dem_affl))+geom_histogram(binwidth=1)
+ggplot(organics,aes(x=dem_affl))+geom_histogram(binwidth=1) + facet_wrap(~clusters1$cluster)
+
+ggplot(organics,aes(x=dem_age))+geom_histogram(binwidth=5)
+ggplot(organics,aes(x=dem_age))+geom_histogram(binwidth=5) + facet_wrap(~clusters1$cluster)
+
+ggplot(organics,aes(x=prom_spend))+geom_histogram(binwidth=1000)
+ggplot(organics,aes(x=prom_spend))+geom_histogram(binwidth=1000) + facet_wrap(~clusters1$cluster)
+
+ggplot(organics,aes(x=prom_time))+geom_histogram(binwidth=5)
+ggplot(organics,aes(x=prom_time))+geom_histogram(binwidth=5) + facet_wrap(~clusters1$cluster)
+
+
+
+ggplot(odat2,aes(dem_gender))+geom_bar()
+ggplot(odat2,aes(dem_gender))+geom_bar()+facet_wrap(~clusters1$cluster)
+
+
+ggplot(odat2,aes(prom_class))+geom_bar()
+ggplot(odat2,aes(prom_class))+geom_bar()+facet_wrap(~clusters1$cluster)
+
+ggplot(odat2,aes(target_buy))+geom_bar()
+ggplot(odat2,aes(target_buy))+geom_bar()+facet_wrap(~clusters1$cluster)
+
+```
