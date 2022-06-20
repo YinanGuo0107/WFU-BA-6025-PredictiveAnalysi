@@ -1,0 +1,494 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(kableExtra)
+library(GGally)
+library(kableExtra) # -- make nice looking resutls when we knitt 
+library(vip)        # --  tidymodels variable importance
+library(fastshap)   # -- shapley values for variable importance 
+library(rpart.plot) # -- plotting decision trees 
+library(MASS)
+library(caret)
+library(rpart)
+```
+
+# import data
+```{r}
+org<- read_csv("organics.csv") %>% clean_names()
+head(org)
+neworg <- read_csv("new_organics.csv") %>% clean_names()
+head(neworg)
+```
+# remove columns
+```{r}
+subset(org,select=c(dem_affl,dem_age,dem_cluster_group,
+                    dem_gender,dem_reg,dem_tv_reg,
+                    prom_class,prom_spend,prom_time,target_buy))->org
+org
+colnames(org)<-make.unique(names(org))
+```
+
+# skim organics
+```{r}
+org %>%skim()
+neworg%>%skim()
+```
+
+# Explore variables
+## Explore target
+```{r}
+org %>%
+  ggplot(aes(x=target_buy)) +
+  geom_histogram(stat="count") +
+  labs(title = "Buy vs. Not Buy ")
+
+org %>%
+  group_by(target_buy) %>%
+  summarize(n=n()) %>%
+  ungroup() %>%
+  mutate(pct = n/sum(n))
+
+```
+
+## Explore numerics
+```{r}
+org<-org%>%
+  mutate(target_buy=as.factor(target_buy))
+# -- comparative histogram
+ggplot(org,aes(x=dem_affl))+
+  geom_histogram(data=subset(org,target_buy==0),fill="red", alpha = 0.5, bins = 50) +
+  geom_histogram(data=subset(org,target_buy==1),fill = "blue", alpha = 0.5,  bins = 50) +
+  labs(title="Affluence Grade by target_buy = 0 (red) vs by target_buy = 1 (blue)")
+
+ggplot(org,aes(x=dem_age))+
+  geom_histogram(data=subset(org,target_buy==0),fill="red", alpha = 0.5, bins = 50) +
+  geom_histogram(data=subset(org,target_buy==1),fill = "blue", alpha = 0.5,  bins = 50) +
+  labs(title="Age by target_buy = 0 (red) vs by target_buy = 1 (blue)")
+
+ggplot(org,aes(x=prom_spend))+
+  geom_histogram(data=subset(org,target_buy==0),fill="red", alpha = 0.5, bins = 50) +
+  geom_histogram(data=subset(org,target_buy==1),fill = "blue", alpha = 0.5,  bins = 50) +
+  labs(title="Total amount spent in the store this year by target_buy = 0 (red) vs by target_buy = 1 (blue)")
+
+ggplot(org,aes(x=prom_time))+
+  geom_histogram(data=subset(org,target_buy==0),fill="red", alpha = 0.5, bins = 50) +
+  geom_histogram(data=subset(org,target_buy==1),fill = "blue", alpha = 0.5,  bins = 50) +
+  labs(title="Time as loyalty card member by target_buy = 0 (red) vs by target_buy = 1 (blue)")
+
+# -- comparative boxplots
+ggplot(org, aes(x=dem_affl, y=target_buy)) + geom_boxplot() +labs(title = "Affluence Grade")
+ggplot(org, aes(x=dem_age, y=target_buy)) + geom_boxplot() +labs(title = "Age")
+ggplot(org, aes(x=prom_spend, y=target_buy)) + geom_boxplot() +labs(title = "Total amount spent in the store this year")
+ggplot(org, aes(x=prom_time, y=target_buy)) + geom_boxplot() +labs(title = "Time as loyalty card member")
+
+```
+
+## Explore characters
+```{r}
+
+char_explore <- function(col){
+  org %>%
+    ggplot(., aes(!!as.name(col))) + 
+    geom_bar(aes(fill = target_buy), position = "fill") 
+}
+
+# -- for each character column if it doesnt equal customer id then create a chart
+for (column in names(org %>% select_if (is_character))){
+  chrt <- char_explore(column)
+    print(chrt)
+  
+}
+```
+# Generate Models
+## 0. Make Factors! 
+```{r}
+org %>%
+    mutate_if(is.character, factor)-> org_prep
+org_prep$target_buy <- as.factor(org_prep$target_buy)
+head(org_prep)
+```
+
+## 1. Partition your data 70/30 (train / test split) 
+
+
+```{r}
+# -- set a random seed for repeatablity 
+set.seed(43)
+
+# -- performs our train / test split 
+org_split <- initial_split(org_prep, prop = 0.7)
+
+# -- extract the training data 
+org_train <- training(org_split)
+# -- extract the test data 
+org_test <- testing(org_split)
+
+sprintf("Train PCT : %1.2f%%", nrow(org_train)/ nrow(org_prep) * 100)
+sprintf("Test  PCT : %1.2f%%", nrow(org_test)/ nrow(org_prep) * 100)
+
+```
+
+## 2. Recipe
+
+```{r}
+org_recipe <- recipe(target_buy ~ ., data = org_train) %>%
+  step_mutate(dem_gender=replace_na(dem_gender,"U")) %>%
+  step_modeimpute(all_nominal(), -all_outcomes()) %>%
+  step_medianimpute(all_numeric()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  prep()
+org_recipe
+```
+
+
+## 3. Bake 
+
+```{r}
+bake_train <- bake(org_recipe, new_data = org_train)
+bake_test  <- bake(org_recipe, new_data = org_test)
+```
+
+
+## 4.Fit
+### 4.1 Default Decision tree
+
+```{r}
+org_tree <- decision_tree(mode="classification") %>%
+                  set_engine("rpart") %>%
+                  fit(target_buy ~ ., data = bake_train)
+
+org_tree
+
+rpart.plot(org_tree$fit, roundint=FALSE, extra=3)
+
+```
+
+### Decision tree 2
+```{r}
+set.seed(123)
+org_tree1 <- train(target_buy ~ .,
+                   data = bake_train, 
+                  method="rpart",
+                  trControl = trainControl("cv", number = 40),
+                  tuneLength = 20)
+plot(org_tree1)
+org_tree1$bestTune
+```
+
+```{r}
+org_tree2 <- decision_tree(mode="classification",
+                            cost_complexity = 0.0011,
+                            tree_depth = 6,
+                            min_n = 2) %>%
+                  set_engine("rpart") %>%
+                  fit(target_buy ~ ., data=bake_train)
+
+org_tree2$fit
+
+options(scipen = 0)
+
+rpart.plot(org_tree2$fit, roundint=FALSE, extra=3)
+
+```
+
+## 4.2 Logistic Regression
+### 4.2.1 full model
+```{r}
+logistic_glm <-logistic_reg(mode = "classification") %>%
+                  set_engine("glm") %>%
+                  fit(target_buy ~ ., data = bake_train)
+
+tidy(logistic_glm) %>%
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"),round, 4)
+
+```
+
+### 4.2.2 Stepwise Model
+```{r}
+steplog <- glm(target_buy ~ ., data = bake_train, family=binomial(link="logit"))
+step <- stepAIC(steplog, direction="both")
+summary(step)
+
+```
+
+
+
+```{r}
+## -- Use tidymodel framework to fit and evaulate reduced model
+org_steprecipe <- recipe(target_buy ~ dem_affl + dem_age + dem_gender , data = org_train) %>%
+  step_medianimpute(all_numeric()) %>%
+  prep()
+org_steprecipe
+
+# -- apply new recipe 
+bake_steptrain <- bake(org_steprecipe, new_data = org_train)
+bake_steptest  <- bake(org_steprecipe, new_data = org_test)
+
+logistic_step1 <-logistic_reg(mode = "classification") %>%
+                  set_engine("glm") %>%
+                  fit(target_buy ~ ., data = bake_steptrain)
+
+## -- check out your parameter estimates ... 
+tidy(logistic_step1) %>%
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"),round, 4)
+```
+
+## 5. Prep for Evaluation 
+### 5.1 Decision tree 1
+```{r}
+
+# -- training 
+predict(org_tree, bake_train, type = "prob") %>%
+  bind_cols(.,predict(org_tree, bake_train)) %>%
+  bind_cols(.,bake_train) -> scored_train_tree
+
+head(scored_train_tree)
+
+# -- testing 
+predict(org_tree, bake_test, type = "prob") %>%
+  bind_cols(.,predict(org_tree, bake_test)) %>%
+  bind_cols(.,bake_test) -> scored_test_tree
+
+head(scored_test_tree)
+```
+
+### 5.2 Decision tree 2
+```{r}
+# -- training 
+predict(org_tree2, bake_train, type = "prob") %>%
+  bind_cols(.,predict(org_tree2, bake_train)) %>%
+  bind_cols(.,bake_train) -> scored_train_tree2
+
+head(scored_train_tree2)
+
+# -- testing 
+predict(org_tree2, bake_test, type = "prob") %>%
+  bind_cols(.,predict(org_tree2, bake_test)) %>%
+  bind_cols(.,bake_test) -> scored_test_tree2
+
+head(scored_test_tree2)
+```
+
+
+### 5.3 logistic regression full model
+```{r}
+# -- training 
+predict(logistic_glm, bake_train, type = "prob") %>%
+  bind_cols(.,predict(logistic_glm, bake_train)) %>%
+  bind_cols(.,bake_train) -> scored_train_glm
+
+head(scored_train_glm)
+
+# -- testing 
+predict(logistic_glm, bake_test, type = "prob") %>%
+  bind_cols(.,predict(logistic_glm, bake_test)) %>%
+  bind_cols(.,bake_test) -> scored_test_glm
+
+head(scored_test_glm)
+```
+
+### 5.4 logistic regression reduced model
+```{r}
+# -- training predictions from reduced model
+predict(logistic_step1, bake_steptrain, type = "prob") %>%
+  bind_cols(.,predict(logistic_step1, bake_steptrain)) %>%
+  bind_cols(.,bake_steptrain) -> scored_train_step1
+
+head(scored_train_step1)
+
+# -- testing predictions from reduced model
+predict(logistic_step1, bake_steptest, type = "prob") %>%
+  bind_cols(.,predict(logistic_step1, bake_steptest)) %>%
+  bind_cols(.,bake_steptest) -> scored_test_step1
+
+head(scored_test_step1)
+```
+
+
+## 6. Evaluate
+
+### 6.1 Decision tree 1
+```{r}
+options(yardstick.event_first = FALSE)
+# -- AUC: Train and Test 
+scored_train_tree %>% 
+  metrics(target_buy, .pred_1, estimate = .pred_class) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test_tree %>% 
+               metrics(target_buy, .pred_1, estimate = .pred_class) %>%
+               mutate(part="testing") 
+  ) 
+
+# -- Variable Importance top 10 features  
+org_tree %>%
+  vip(num_features = 5)
+
+# -- ROC Charts 
+scored_train_tree %>%
+  mutate(model = "train") %>%
+  bind_rows(scored_test_tree %>%
+              mutate(model="test")) %>%
+  group_by(model) %>%
+  roc_curve(target_buy, .pred_1) %>%
+  autoplot()
+
+
+# -- Confustion Matricies  
+scored_train_tree %>%
+  conf_mat(target_buy, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Train Confusion Matrix")
+
+scored_test_tree %>%
+  conf_mat(target_buy, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Test Confusion Matrix")
+
+```
+
+### 6.2 decision tree 2
+```{r}
+options(yardstick.event_first = FALSE)
+# -- AUC: Train and Test 
+scored_train_tree2 %>% 
+  metrics(target_buy, .pred_1, estimate = .pred_class) %>%
+  mutate(part="training") %>%
+  bind_rows(scored_test_tree2 %>% 
+               metrics(target_buy, .pred_1, estimate = .pred_class) %>%
+               mutate(part="testing") 
+  ) 
+
+# -- Variable Importance top 10 features  
+org_tree %>%
+  vip(num_features = 5)
+
+# -- ROC Charts 
+scored_train_tree2 %>%
+  mutate(model = "train") %>%
+  bind_rows(scored_test_tree2 %>%
+              mutate(model="test")) %>%
+  group_by(model) %>%
+  roc_curve(target_buy, .pred_1) %>%
+  autoplot()
+
+
+# -- Confustion Matricies  
+scored_train_tree2 %>%
+  conf_mat(target_buy, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Train Confusion Matrix")
+
+scored_test_tree2 %>%
+  conf_mat(target_buy, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Test Confusion Matrix")
+
+```
+
+### 6.3 logistic regression full model
+```{r}
+# -- AUC: Train and Test 
+scored_train_glm %>% 
+  metrics(target_buy, .pred_1, estimate = .pred_class) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test_glm %>% 
+               metrics(target_buy, .pred_1, estimate = .pred_class) %>%
+               mutate(part="testing") ) 
+
+# -- Variable Importance top 10 features  
+logistic_glm %>%
+  vip(num_features = 10)
+
+# -- ROC Charts 
+scored_train_glm %>%
+  mutate(model = "train") %>%
+  bind_rows(scored_test_glm %>%
+              mutate(model="test")) %>%
+  group_by(model) %>%
+  roc_curve(target_buy, .pred_1) %>%
+  autoplot()
+
+# -- Confustion Matricies  
+scored_train_glm %>%
+  conf_mat(target_buy, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Train Confusion Matrix")
+
+scored_test_glm %>%
+  conf_mat(target_buy, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Test Confusion Matrix")
+```
+
+### 6.4 reduced model
+```{r}
+# -- Evaluate Reduced Model
+# -- AUC: Train and Test 
+scored_train_step1 %>% 
+  metrics(target_buy, .pred_1, estimate = .pred_class) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test_step1 %>% 
+               metrics(target_buy, .pred_1, estimate = .pred_class) %>%
+               mutate(part="testing") 
+  )
+
+options(yardstick.event_first = FALSE)
+# -- ROC Charts 
+scored_train_step1 %>%
+  mutate(model = "train") %>%
+  bind_rows(scored_test_step1 %>%
+              mutate(model="test")) %>%
+  group_by(model) %>%
+  roc_curve(target_buy, .pred_1) %>%
+  autoplot()
+
+# -- Confustion Matricies  
+scored_train_step1 %>%
+  conf_mat(target_buy, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Train Confusion Matrix")
+
+scored_test_step1 %>%
+  conf_mat(target_buy, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Test Confusion Matrix")
+```
+
+# Fit in new chart
+## 1. subset chart
+```{r}
+subset(neworg,select=c(dem_affl,dem_age,dem_cluster_group,
+                       dem_gender,dem_reg,dem_tv_reg,prom_class,prom_spend,prom_time))->neworg
+colnames(neworg)<-make.unique(names(neworg))
+neworg
+  
+```
+## 2. Bake
+```{r}
+bake_neworg  <- bake(org_recipe, new_data = neworg) %>%
+  mutate(dem_cluster_group_U=0,dem_tv_reg_C.Scotland=0)
+```
+
+## 3. predict
+```{r}
+predict(org_tree2, bake_neworg, type = "prob") %>%
+  bind_cols(.,predict(org_tree2, bake_neworg)) %>%
+  bind_cols(.,bake_neworg) -> scored_neworg_tree
+
+head(scored_neworg_tree)
+```
+## 4.output table
+```{r}
+write.table(scored_neworg_tree,"new_organics_prediction.csv",row.names=FALSE,col.names=TRUE,sep=",")
+```
+
