@@ -1,0 +1,531 @@
+---
+title: "Final Project"
+output: html_notebook
+---
+# load library
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(vip)
+library(parallel)
+library(doParallel)
+library(embed)
+library(rpart.plot) 
+library(rpart) 
+library(kableExtra)
+library(GGally)
+library(vip) 
+library(fastshap)  
+library(MASS)
+library(caret)
+library(glmnet)
+library(reshape2)
+
+```
+
+# import data
+```{r}
+car_loan <- read_csv("car_loan.csv") %>%
+  clean_names() 
+head(car_loan)
+```
+
+# skim 
+```{r}
+car_loan %>%
+  skim()
+```
+
+# Mutate variables
+## transform average_acct_age and credit_history_length
+```{r}
+car_loan %>%
+  mutate(acct_yr=  chartr('yrs','   ',substr(average_acct_age,0,2))) %>%
+  mutate(acct_yr= as.numeric(str_replace_all(acct_yr, " ", "")))%>%
+  mutate(acct_mth=  chartr('mon','   ',substr(average_acct_age,6,8))) %>%
+  mutate(acct_mth= as.numeric(str_replace_all(acct_mth, " ", "")))%>%
+  mutate(average_acct_month = acct_yr * 12 + acct_mth) %>%
+  mutate(credit_yr=  chartr('yrs','   ',substr(credit_history_length,0,2))) %>%
+  mutate(credit_yr= as.numeric(str_replace_all(credit_yr, " ", "")))%>%
+  mutate(credit_mth=  chartr('mon','   ',substr(credit_history_length,6,8))) %>%
+  mutate(credit_mth= as.numeric(str_replace_all(credit_mth, " ", "")))%>%
+  mutate(credit_history_month = credit_yr * 12 + credit_mth) %>%
+  dplyr::select(-acct_yr,-acct_mth,-average_acct_age,-credit_yr,-credit_mth,-credit_history_length) ->car_loan
+
+```
+
+## date into days
+```{r}
+car_loan %>%
+  mutate(date_of_birth=chartr('/','-',date_of_birth)) %>%
+  mutate(date_of_birth=as.Date(date_of_birth,format='%d-%m-%Y')) %>%
+  mutate(birth_days=as.numeric(as.Date("2021-01-01")-date_of_birth))%>%
+  dplyr::select(-date_of_birth)->car_loan
+```
+
+## as factor
+```{r}
+car_loan %>%
+  mutate(loan_default=as.factor(loan_default))->car_loan
+```
+
+
+# Data Exploration
+## Explore target
+```{r}
+car_loan %>%
+  count(loan_default) %>%
+  mutate(pct = n/sum(n)) -> default_rate
+
+default_rate %>%
+  ggplot(aes(x=loan_default, y=pct)) +
+  geom_col() +
+  geom_text(aes(label=pct) ,color="red") + 
+  labs(title="Default Rate")
+```
+
+## Explore numerics
+```{r}
+boxplot<- function(a,b){
+  ggplot(car_loan, aes(x={{a}},y=loan_default,group=loan_default)) + geom_boxplot() +labs(title = b)
+}
+
+boxplot(disbursed_amount,"disbursed_amount")
+boxplot(asset_cost,"asset_cost")
+boxplot(ltv,"ltv")
+boxplot(branch_id,"branch_id")
+boxplot(supplier_id,"supplier_id")
+boxplot(manufacturer_id,"manufacturer_id")
+boxplot(current_pincode_id,"current_pincode_id")
+boxplot(state_id,"state_id")
+boxplot(employee_code_id,"employee_code_id")
+boxplot(mobile_no_avl_flag,"mobile_no_avl_flag")
+boxplot(aadhar_flag,"aadhar_flag")
+boxplot(pan_flag,"pan_flag")
+boxplot(voter_id_flag,"voter_id_flag")
+boxplot(driving_flag,"driving_flag")
+boxplot(passport_flag,"passport_flag")
+boxplot(perform_cns_score,"perform_cns_score")
+boxplot(pri_no_of_accts,"pri_no_of_accts")
+boxplot(pri_active_accts,"pri_active_accts")
+boxplot(pri_overdue_accts,"pri_overdue_accts")
+boxplot(pri_current_balance,"pri_current_balance")
+boxplot(pri_sanctioned_amount,"pri_sanctioned_amount")
+boxplot(pri_disbursed_amount,"pri_disbursed_amount")
+boxplot(sec_no_of_accts,"sec_no_of_accts")
+boxplot(sec_active_accts,"sec_active_accts")
+boxplot(sec_overdue_accts,"sec_overdue_accts")
+boxplot(sec_current_balance,"sec_current_balance")
+boxplot(sec_sanctioned_amount,"sec_sanctioned_amount")
+boxplot(sec_disbursed_amount,"sec_disbursed_amount")
+boxplot(primary_instal_amt,"primary_instal_amt")
+boxplot(sec_instal_amt,"sec_instal_amt")
+boxplot(new_accts_in_last_six_months,"new_accts_in_last_six_months")
+boxplot(delinquent_accts_in_last_six_months,"delinquent_accts_in_last_six_months")
+boxplot(no_of_inquiries,"no_of_inquiries")
+boxplot(average_acct_month,"average_acct_month")
+boxplot(credit_history_month,"credit_history_month")
+boxplot(birth_days,"age")
+```
+
+## Explore character
+```{r}
+bar_plot <- function(a,colname){
+    car_loan %>%
+    ggplot(., aes(a)) + 
+    geom_bar(aes(fill = loan_default), position = "fill") +
+    labs(title = paste("Barplot for",colname), x = colname, y="percent")+
+    geom_hline(yintercept = 0.21707)+
+    theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5))
+}
+bar_plot(car_loan$employment_type,"employment_type")
+bar_plot(car_loan$perform_cns_score_description,"perform_cns_score_description")
+```
+
+## Explore correlation
+```{r}
+library(corrplot)
+cormat <- cor(select_if(car_loan%>%na.omit(),is.numeric))
+round(cormat, 2)
+corrplot(cormat,tl.cex  = 0.5)
+```
+
+# define train/test split 
+```{r}
+set.seed(42)
+train_test_spit<- initial_split(car_loan, prop = 0.7)
+
+train <- training(train_test_spit)
+test  <- testing(train_test_spit)
+
+train_cv_folds <- vfold_cv(train, v=5)
+```
+
+# define recipe
+```{r}
+recipe <- recipe(loan_default ~ ., 
+                      data = train) %>%
+  step_rm(unique_id,mobile_no_avl_flag) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_impute_mode(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+```
+
+# logistic regression full
+```{r}
+logistic_spec <- logistic_reg() %>%
+  set_mode("classification") %>%
+  set_engine("glm")
+
+logistic_full_wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(logistic_spec) %>%
+  fit(train)
+
+logistic_full_wf %>%
+  pull_workflow_fit() %>%
+  tidy() %>%
+  mutate(across(is.numeric,round,3))
+
+logistic_full_wf %>%
+  pull_workflow_fit() %>%
+  vip()
+
+options(yardstick.event_first = FALSE)
+predict(logistic_full_wf, train, type="prob") %>%
+  bind_cols(predict(logistic_full_wf, train, type="class")) %>%
+  bind_cols(train) ->logistic_train
+
+logistic_train %>%
+  metrics(loan_default, estimate = .pred_class, .pred_1)
+
+predict(logistic_full_wf, test, type="prob") %>%
+  bind_cols(predict(logistic_full_wf, test, type="class")) %>%
+  bind_cols(test) -> logistic_test 
+
+logistic_test %>%
+  metrics(loan_default, estimate = .pred_class, .pred_1)
+```
+
+# reduced logistic
+```{r}
+recipe1 <- recipe(loan_default ~ ., 
+                      data = train) %>%
+  step_rm(unique_id,mobile_no_avl_flag,voter_id_flag,pri_sanctioned_amount,
+          pri_disbursed_amount,sec_current_balance,primary_instal_amt,sec_instal_amt,
+          new_accts_in_last_six_months) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_impute_mode(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+
+logistic_spec <- logistic_reg() %>%
+  set_mode("classification") %>%
+  set_engine("glm")
+
+logistic_full_wf1 <- workflow() %>%
+  add_recipe(recipe1) %>%
+  add_model(logistic_spec) %>%
+  fit(train)
+
+logistic_full_wf1 %>%
+  pull_workflow_fit() %>%
+  tidy() %>%
+  mutate(across(is.numeric,round,3))
+
+logistic_full_wf1 %>%
+  pull_workflow_fit() %>%
+  vip()
+
+options(yardstick.event_first = FALSE)
+predict(logistic_full_wf1, train, type="prob") %>%
+  bind_cols(predict(logistic_full_wf1, train, type="class")) %>%
+  bind_cols(train) ->logistic_train1
+
+logistic_train1 %>%
+  metrics(loan_default, estimate = .pred_class, .pred_1)
+
+predict(logistic_full_wf1, test, type="prob") %>%
+  bind_cols(predict(logistic_full_wf1, test, type="class")) %>%
+  bind_cols(test) -> logistic_test1
+
+logistic_test1 %>%
+  metrics(loan_default, estimate = .pred_class, .pred_1)
+```
+
+# default decision tree
+```{r}
+tree_spec <- decision_tree(c=0) %>%
+  set_mode("classification") %>%
+  set_engine("rpart")
+
+tree_wf1 <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(tree_spec) %>%
+  fit(train)
+
+tree_wf1 %>%
+  pull_workflow_fit() %>%
+  vip()
+
+# -- deal w. the first event issue -- # 
+options(yardstick.event_first = FALSE)
+predict(tree_wf1, train, type="prob") %>%
+  bind_cols(predict(tree_wf1, train, type="class")) %>%
+  bind_cols(train) ->tree_train1
+
+tree_train1%>%
+  metrics(loan_default, estimate = .pred_class, .pred_1)
+
+predict(tree_wf1, test, type="prob") %>%
+  bind_cols(predict(tree_wf1, test, type="class")) %>%
+  bind_cols(test) -> tree_test1
+
+tree_test1 %>%
+  metrics(loan_default, estimate = .pred_class, .pred_1)
+```
+
+## calculate cp
+```{r}
+set.seed(123)
+tree1 <- train(loan_default ~ .,
+                   data = bake_train, 
+                  method="rpart",
+                  trControl = trainControl("cv", number = 40),
+                  tuneLength = 20)
+plot(tree1)
+tree1$bestTune
+```
+
+# Best cp tree
+```{r}
+tree_spec2 <- decision_tree(c=0.0001979358) %>%
+  set_mode("classification") %>%
+  set_engine("rpart")
+
+tree_wf2 <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(tree_spec2) %>%
+  fit(train)
+
+tree_wf2 %>%
+  pull_workflow_fit() %>%
+  vip()
+
+# -- deal w. the first event issue -- # 
+options(yardstick.event_first = FALSE)
+predict(tree_wf2, train, type="prob") %>%
+  bind_cols(predict(tree_wf2, train, type="class")) %>%
+  bind_cols(train) ->tree_train2
+tree_train2%>%
+  metrics(loan_default, estimate = .pred_class, .pred_1)
+
+predict(tree_wf2, test, type="prob") %>%
+  bind_cols(predict(tree_wf2, test, type="class")) %>%
+  bind_cols(test) -> tree_test2
+tree_test2 %>%
+  metrics(loan_default, estimate = .pred_class, .pred_1)
+```
+
+#Random forest
+```{r,message=FALSE,warning=FALSE}
+cores <- parallel::detectCores()
+print(cores)
+
+
+forest_spec <- rand_forest(
+  mtry=7,
+  trees = 200,
+  min_n = 10
+  ) %>%
+  set_mode("classification") %>%
+  set_engine("ranger",
+             num.threads = 8,  
+             importance = "impurity")
+
+forest_wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(forest_spec) %>%
+  fit(train)
+
+forest_wf %>% 
+  pull_workflow_fit() %>%
+  vip(20)
+
+```
+
+## Evaluation 
+```{r,message=FALSE,warning=FALSE}
+options(yardstick.event_first = FALSE)
+train_score_rf <-predict(forest_wf , train, type="prob") %>%
+bind_cols(predict(forest_wf , train, type="class")) %>%
+bind_cols(train)
+
+test_score_rf <-predict(forest_wf , test, type="prob") %>%
+bind_cols(predict(forest_wf , test, type="class")) %>%
+bind_cols(test)
+  
+# -- metrics -- 
+train_score_rf %>% 
+  metrics(loan_default, estimate = .pred_class, .pred_1)
+test_score_rf %>%
+  metrics(loan_default, estimate = .pred_class, .pred_1)
+
+# -- roc curve plot -- 
+test_score_rf %>%
+  mutate(model = "forest test") %>%
+  bind_rows(train_score_rf %>%
+              mutate(model="forest  train")) %>%
+  group_by(model) %>%
+  roc_curve(loan_default, .pred_1) %>%
+  autoplot()
+```
+
+```{r,message=FALSE,warning=FALSE}
+
+# --model spec w. tuning 
+rf_model <- rand_forest(
+    trees  = tune(),
+    min_n = tune(),
+   ) %>% 
+      set_engine("ranger", importance = "impurity") %>% 
+      set_mode("classification")
+
+# -- workflow 
+rf_workflow <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model) 
+
+
+
+# --tuning grid -- random force 
+tune_grid <- grid_random(trees(c(100,500)),
+                         min_n(),
+                          size = 5)
+print(tune_grid)
+
+# --parallel process 
+all_cores <- detectCores(logical = TRUE)
+sprintf("# of Logical Cores: %d", all_cores)
+cl <- makeCluster(all_cores)
+registerDoParallel(cl)
+
+# -- train K times for each parameter -- 
+rf_tuning_results <- rf_workflow %>% 
+  tune_grid(
+    resamples = train_cv_folds,
+    grid = tune_grid,
+    control = control_resamples(save_pred = TRUE)
+    )
+
+rf_tuning_results
+
+```
+## Review Tuning Results 
+```{r}
+## -- results of tuning -- 
+rf_tuning_results %>% 
+  collect_metrics() %>%
+  mutate_if(is.numeric, round,3) %>% 
+  pivot_wider(names_from = .metric, values_from=c(mean, std_err))
+```
+
+
+## Visualize impact 
+
+```{r}
+## - visualize 
+rf_tuning_results %>%
+  collect_metrics() %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(trees, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+
+rf_tuning_results %>%
+  collect_metrics()  %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(min_n, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+
+```
+
+## refitting workflow with "best" parameters
+
+```{r}
+rf_tuning_results %>%
+  show_best("accuracy") %>%
+  print()
+
+rf_best <- rf_tuning_results %>%
+  select_best("accuracy") 
+
+print(rf_best)
+rf_final_wf <- rf_workflow %>% 
+  finalize_workflow(rf_best )
+
+print(rf_final_wf)
+
+rf_final_fit  <- rf_final_wf %>%
+  fit(data = train) 
+```
+
+#variable of importance
+```{r}
+rf_final_fit %>% 
+  extract_fit_parsnip() %>% 
+  vip(20)
+```
+
+#predict
+```{r}
+
+scored_train_rft <-predict(rf_final_fit  , train, type="prob") %>%
+bind_cols(predict(rf_final_fit  , train, type="class")) %>%
+bind_cols(train)
+
+ scored_test_rft <-predict(rf_final_fit  , test, type="prob") %>%
+bind_cols(predict(rf_final_fit , test, type="class")) %>%
+bind_cols(test)
+
+  
+```
+#evaluation
+```{r,message=FALSE,warning=FALSE}
+calc_metrics <- function(data_set){
+  data_set %>%
+  conf_mat(loan_default, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") + labs(title="confusion matrix default") -> p 
+  print(p)
+
+data_set %>%
+  accuracy(loan_default, estimate = .pred_class) %>%
+  bind_rows(data_set %>%
+  precision(loan_default, estimate = .pred_class)   ) %>%
+  bind_rows(data_set %>%
+  recall(loan_default, estimate = .pred_class)  )
+}
+```
+
+#Evaluation result
+```{r}
+calc_metrics(scored_train_rft )
+calc_metrics(scored_test_rft)
+# -- roc curve plot -- 
+scored_test_rft%>%
+  mutate(model = "rf test") %>%
+  bind_rows(scored_train_rft %>%
+              mutate(model="rf train")) %>%
+  group_by(model) %>%
+  roc_curve(loan_default,.pred_1) %>%
+  autoplot()
+
+```
+
+
